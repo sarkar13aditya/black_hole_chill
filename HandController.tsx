@@ -7,127 +7,117 @@ interface HandControllerProps {
 
 export const HandController: React.FC<HandControllerProps> = ({ onInput }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const landmarkerRef = useRef<HandLandmarker | null>(null);
   
-  // States: IDLE -> LOADING -> CAMERA_ACTIVE (or MOUSE_FALLBACK)
-  const [status, setStatus] = useState<'IDLE' | 'LOADING' | 'CAMERA_ACTIVE' | 'MOUSE_FALLBACK'>('IDLE');
+  // Debug State
+  const [logs, setLogs] = useState<string[]>(["System Initialized..."]);
   const [cursor, setCursor] = useState({ x: 50, y: 50 });
   const [isPinching, setIsPinching] = useState(false);
-  
-  // AI Brain Storage
-  const landmarkerRef = useRef<HandLandmarker | null>(null);
-  const pinchRef = useRef(false);
+  const [active, setActive] = useState(false);
 
-  // ==========================================================
-  // 1. MOUSE MODE (Backup System)
-  // ==========================================================
-  useEffect(() => {
-    if (status === 'MOUSE_FALLBACK') {
-      const handleMouseMove = (e: MouseEvent) => {
-        const x = (e.clientX / window.innerWidth) * 100;
-        const y = (e.clientY / window.innerHeight) * 100;
-        setCursor({ x, y });
-        // Send data immediately
-        onInput(x, y, pinchRef.current);
-      };
-      const handleMouseDown = () => {
-        pinchRef.current = true;
-        setIsPinching(true);
-        onInput(cursor.x, cursor.y, true);
-      };
-      const handleMouseUp = () => {
-        pinchRef.current = false;
-        setIsPinching(false);
-        onInput(cursor.x, cursor.y, false);
-      };
+  // Helper to add logs to screen
+  const log = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 5));
 
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mousedown', handleMouseDown);
-      window.addEventListener('mouseup', handleMouseUp);
-      return () => {
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mousedown', handleMouseDown);
-        window.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [status, onInput, cursor.x, cursor.y]); // Added deps to silence linter
-
-  // ==========================================================
-  // 2. CAMERA MODE (The Real Iron Man Tech)
-  // ==========================================================
   const startCamera = async () => {
-    setStatus('LOADING');
+    log("Requesting Camera Access...");
     try {
-      // A. Request Camera Access
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: 640, height: 480 } // Request standard size
+      });
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.addEventListener("loadeddata", () => predictWebcam());
+        videoRef.current.onloadeddata = () => {
+            log("Camera Feed Active. Loading AI...");
+            initAI();
+        };
       }
+    } catch (err) {
+      log("Error: Camera Access Denied");
+      console.error(err);
+    }
+  };
 
-      // B. Load Google MediaPipe AI
+  const initAI = async () => {
+    try {
       const vision = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
       );
-
+      
       landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-          delegate: "GPU"
+          delegate: "GPU" // Try GPU first
         },
         runningMode: "VIDEO",
         numHands: 1
       });
-
-      setStatus('CAMERA_ACTIVE');
-
+      
+      log("AI Model Loaded! Starting Tracking Loop...");
+      setActive(true);
+      predictWebcam();
+      
     } catch (err) {
-      console.error("Camera Access Failed:", err);
-      // Auto-fallback if permission denied
-      setStatus('MOUSE_FALLBACK'); 
+      log("Error: AI Failed to Load");
+      console.error(err);
     }
   };
 
   const predictWebcam = () => {
-    if (status === 'MOUSE_FALLBACK') return;
-
     if (videoRef.current && landmarkerRef.current) {
       const startTimeMs = performance.now();
-      const results = landmarkerRef.current.detectForVideo(videoRef.current, startTimeMs);
+      
+      try {
+        const results = landmarkerRef.current.detectForVideo(videoRef.current, startTimeMs);
 
-      if (results.landmarks && results.landmarks.length > 0) {
-        const landmarks = results.landmarks[0];
-        
-        // 1. TRACKING (Index Finger Tip #8)
-        const indexTip = landmarks[8];
-        const x = (1 - indexTip.x) * 100; // Mirror effect
-        const y = indexTip.y * 100;
-        
-        // 2. GESTURE (Pinch Detection)
-        // Measure distance between Thumb Tip (#4) and Index Tip (#8)
-        const thumbTip = landmarks[4];
-        const distance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
-        
-        // If fingers are close (< 0.05), count as a "Click"
-        const pinched = distance < 0.05; 
+        if (results.landmarks && results.landmarks.length > 0) {
+          const landmarks = results.landmarks[0];
+          
+          // Track Index Finger Tip (8)
+          const indexTip = landmarks[8];
+          const x = (1 - indexTip.x) * 100; // Mirror X
+          const y = indexTip.y * 100;
+          
+          // Pinch Detection (Distance between Thumb(4) and Index(8))
+          const thumbTip = landmarks[4];
+          const d = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+          const pinched = d < 0.1; // Threshold
 
-        setCursor({ x, y });
-        setIsPinching(pinched);
-        onInput(x, y, pinched);
+          setCursor({ x, y });
+          setIsPinching(pinched);
+          onInput(x, y, pinched);
+        } 
+      } catch (e) {
+        // Sometimes GPU context is lost, ignore single frame errors
       }
+      
       requestAnimationFrame(predictWebcam);
     }
   };
 
-  // ==========================================================
-  // UI RENDER
-  // ==========================================================
   return (
     <>
-      {/* Invisible Video Element (Required for AI) */}
-      <video ref={videoRef} autoPlay playsInline className="absolute top-0 left-0 opacity-0 pointer-events-none -z-10 w-64 h-48" />
+      {/* 1. VISIBLE VIDEO (For Debugging - Bottom Right) */}
+      <video 
+        ref={videoRef} 
+        autoPlay 
+        playsInline 
+        className="fixed bottom-0 right-0 w-48 h-36 border-2 border-red-500 opacity-50 z-50 pointer-events-none" 
+      />
 
-      {/* Red Dot Cursor */}
-      {(status === 'CAMERA_ACTIVE' || status === 'MOUSE_FALLBACK') && (
+      {/* 2. DEBUG LOGS (Bottom Left) */}
+      <div className="fixed bottom-20 left-10 z-50 font-mono text-xs text-green-400 bg-black/80 p-4 border border-green-500 rounded">
+        <h3 className="font-bold underline mb-2">DIAGNOSTICS</h3>
+        {logs.map((l, i) => <div key={i}>{l}</div>)}
+        <div className="mt-2 text-white">
+           Tracking: {active ? "ON" : "OFF"} <br/>
+           Cursor: {cursor.x.toFixed(0)}, {cursor.y.toFixed(0)} <br/>
+           Pinch: {isPinching ? "YES" : "NO"}
+        </div>
+      </div>
+
+      {/* 3. THE RED DOT */}
+      {active && (
         <div 
           className={`fixed w-4 h-4 rounded-full border-2 border-white shadow-[0_0_15px_red] pointer-events-none z-50 transition-all duration-75 ease-out ${isPinching ? 'bg-white scale-150' : 'bg-red-500 scale-100'}`}
           style={{ 
@@ -138,31 +128,15 @@ export const HandController: React.FC<HandControllerProps> = ({ onInput }) => {
         />
       )}
 
-      {/* Start Button */}
-      {status === 'IDLE' && (
-        <div className="fixed inset-0 flex items-end justify-center pb-10 pointer-events-none z-50">
-           <button onClick={startCamera} className="pointer-events-auto px-8 py-3 bg-white/10 border border-orange-500 text-orange-500 font-mono backdrop-blur-md hover:bg-orange-500 hover:text-black transition-all">
-             INITIALIZE NEURAL INTERFACE
+      {/* 4. START BUTTON */}
+      {!active && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/50 backdrop-blur-sm">
+           <button 
+             onClick={startCamera} 
+             className="px-8 py-3 bg-red-600 text-white font-bold rounded hover:bg-red-500"
+           >
+             START DEBUG MODE
            </button>
-        </div>
-      )}
-      
-      {/* Loading Spinner */}
-      {status === 'LOADING' && (
-        <div className="fixed bottom-10 left-10 text-orange-500 font-mono animate-pulse z-50">
-           LOADING VISION MODELS...
-        </div>
-      )}
-
-      {/* Status HUD */}
-      {(status === 'CAMERA_ACTIVE' || status === 'MOUSE_FALLBACK') && (
-        <div className="fixed bottom-10 left-10 font-mono text-xs opacity-80 pointer-events-none z-40">
-          <p className="text-cyan-500">
-             SYSTEM: {status === 'CAMERA_ACTIVE' ? 'HAND TRACKING' : 'MOUSE EMULATION'}
-          </p>
-          <p className={isPinching ? "text-red-500 font-bold" : "text-gray-500"}>
-            TRIGGER: {isPinching ? "ENGAGED" : "READY"}
-          </p>
         </div>
       )}
     </>
