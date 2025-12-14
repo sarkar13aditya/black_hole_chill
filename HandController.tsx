@@ -9,32 +9,26 @@ export const HandController: React.FC<HandControllerProps> = ({ onInput }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   
-  // Debug State
-  const [logs, setLogs] = useState<string[]>(["System Initialized..."]);
+  // States
+  const [status, setStatus] = useState<'IDLE' | 'LOADING' | 'ACTIVE' | 'ERROR'>('IDLE');
   const [cursor, setCursor] = useState({ x: 50, y: 50 });
   const [isPinching, setIsPinching] = useState(false);
-  const [active, setActive] = useState(false);
 
-  // Helper to add logs to screen
-  const log = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 5));
-
-  const startCamera = async () => {
-    log("Requesting Camera Access...");
+  // 1. Initialize System
+  const startSystem = async () => {
+    setStatus('LOADING');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: 640, height: 480 } // Request standard size
+        video: { width: 640, height: 480 } 
       });
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.onloadeddata = () => {
-            log("Camera Feed Active. Loading AI...");
-            initAI();
-        };
+        videoRef.current.onloadeddata = () => initAI();
       }
     } catch (err) {
-      log("Error: Camera Access Denied");
       console.error(err);
+      setStatus('ERROR');
     }
   };
 
@@ -47,96 +41,114 @@ export const HandController: React.FC<HandControllerProps> = ({ onInput }) => {
       landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-          delegate: "GPU" // Try GPU first
+          delegate: "GPU"
         },
         runningMode: "VIDEO",
         numHands: 1
       });
       
-      log("AI Model Loaded! Starting Tracking Loop...");
-      setActive(true);
+      setStatus('ACTIVE');
       predictWebcam();
       
     } catch (err) {
-      log("Error: AI Failed to Load");
       console.error(err);
+      setStatus('ERROR');
     }
   };
 
+  // 2. Tracking Loop
   const predictWebcam = () => {
     if (videoRef.current && landmarkerRef.current) {
       const startTimeMs = performance.now();
-      
       try {
         const results = landmarkerRef.current.detectForVideo(videoRef.current, startTimeMs);
 
         if (results.landmarks && results.landmarks.length > 0) {
           const landmarks = results.landmarks[0];
           
-          // Track Index Finger Tip (8)
+          // Index Finger Tip (8)
           const indexTip = landmarks[8];
-          const x = (1 - indexTip.x) * 100; // Mirror X
+          const x = (1 - indexTip.x) * 100; 
           const y = indexTip.y * 100;
           
-          // Pinch Detection (Distance between Thumb(4) and Index(8))
+          // Pinch Check (Thumb 4 vs Index 8)
           const thumbTip = landmarks[4];
-          const d = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
-          const pinched = d < 0.1; // Threshold
+          const distance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+          const pinched = distance < 0.1; 
 
           setCursor({ x, y });
           setIsPinching(pinched);
           onInput(x, y, pinched);
         } 
       } catch (e) {
-        // Sometimes GPU context is lost, ignore single frame errors
+        // Ignore frame errors
       }
-      
       requestAnimationFrame(predictWebcam);
     }
   };
 
   return (
     <>
-      {/* 1. VISIBLE VIDEO (For Debugging - Bottom Right) */}
-      <video 
-        ref={videoRef} 
-        autoPlay 
-        playsInline 
-        className="fixed bottom-0 right-0 w-48 h-36 border-2 border-red-500 opacity-50 z-50 pointer-events-none" 
-      />
+      {/* --- VISIBLE VIDEO FEED (The Pilot Cam) --- */}
+      {/* We keep it hidden during IDLE so you don't see a blank box */}
+      <div className={`fixed bottom-6 right-6 z-40 transition-opacity duration-500 ${status === 'ACTIVE' ? 'opacity-100' : 'opacity-0'}`}>
+        {/* The Frame */}
+        <div className="relative border-2 border-cyan-500/50 bg-black/50 p-1 shadow-[0_0_20px_rgba(6,182,212,0.2)]">
+            
+            {/* The Video */}
+            <video 
+                ref={videoRef} 
+                autoPlay 
+                playsInline 
+                // Mirror the video visually so it matches your hand movement
+                className="w-48 h-36 object-cover opacity-80 scale-x-[-1]" 
+            />
 
-      {/* 2. DEBUG LOGS (Bottom Left) */}
-      <div className="fixed bottom-20 left-10 z-50 font-mono text-xs text-green-400 bg-black/80 p-4 border border-green-500 rounded">
-        <h3 className="font-bold underline mb-2">DIAGNOSTICS</h3>
-        {logs.map((l, i) => <div key={i}>{l}</div>)}
-        <div className="mt-2 text-white">
-           Tracking: {active ? "ON" : "OFF"} <br/>
-           Cursor: {cursor.x.toFixed(0)}, {cursor.y.toFixed(0)} <br/>
-           Pinch: {isPinching ? "YES" : "NO"}
+            {/* Decorative Overlay UI */}
+            <div className="absolute top-2 left-2 text-[10px] font-mono text-cyan-500">LIVE FEED</div>
+            <div className={`absolute bottom-2 right-2 w-2 h-2 rounded-full ${isPinching ? 'bg-red-500 animate-ping' : 'bg-green-500'}`} />
+            
+            {/* Scanlines */}
+            <div className="absolute inset-0 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_2px,3px_100%] pointer-events-none opacity-20" />
         </div>
       </div>
 
-      {/* 3. THE RED DOT */}
-      {active && (
+      {/* --- CURSOR (The Red Dot) --- */}
+      {status === 'ACTIVE' && (
         <div 
-          className={`fixed w-4 h-4 rounded-full border-2 border-white shadow-[0_0_15px_red] pointer-events-none z-50 transition-all duration-75 ease-out ${isPinching ? 'bg-white scale-150' : 'bg-red-500 scale-100'}`}
+          className={`fixed w-6 h-6 rounded-full border-2 border-white shadow-[0_0_20px_cyan] pointer-events-none z-50 transition-all duration-75 ease-out ${isPinching ? 'bg-white scale-125' : 'bg-transparent scale-100'}`}
           style={{ 
             left: `${cursor.x}%`, 
             top: `${cursor.y}%`,
             transform: 'translate(-50%, -50%)'
           }}
-        />
+        >
+          <div className="absolute top-1/2 left-0 w-full h-[1px] bg-white/50" />
+          <div className="absolute left-1/2 top-0 h-full w-[1px] bg-white/50" />
+        </div>
       )}
 
-      {/* 4. START BUTTON */}
-      {!active && (
-        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/50 backdrop-blur-sm">
-           <button 
-             onClick={startCamera} 
-             className="px-8 py-3 bg-red-600 text-white font-bold rounded hover:bg-red-500"
-           >
-             START DEBUG MODE
-           </button>
+      {/* --- INITIALIZE BUTTON --- */}
+      {status === 'IDLE' && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/80 backdrop-blur-sm">
+           <div className="text-center">
+             <div className="mb-8 font-mono text-cyan-500 tracking-[0.3em] text-xs">NEURAL INTERFACE STANDBY</div>
+             <button 
+               onClick={startSystem} 
+               className="group relative px-8 py-4 bg-transparent border border-cyan-500 text-cyan-500 font-mono tracking-widest hover:bg-cyan-500 hover:text-black transition-all duration-300"
+             >
+               <span className="relative z-10">INITIALIZE LINK</span>
+               <div className="absolute inset-0 bg-cyan-500/20 blur-xl opacity-0 group-hover:opacity-100 transition-opacity" />
+             </button>
+           </div>
+        </div>
+      )}
+      
+      {/* --- LOADING INDICATOR --- */}
+      {status === 'LOADING' && (
+        <div className="fixed bottom-10 left-10 flex items-center gap-3 font-mono text-xs text-cyan-500 animate-pulse z-50">
+           <div className="w-2 h-2 bg-cyan-500 rounded-full" />
+           CALIBRATING SENSORS...
         </div>
       )}
     </>
