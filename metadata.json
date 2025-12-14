@@ -1,0 +1,5 @@
+{
+  "name": "Black Hole",
+  "description": "A stunning, cinematic 3D visualization of a black hole with an accretion disk and gravitational lensing effects using React Three Fiber and custom shaders.",
+  "requestFramePermissions": []
+}
